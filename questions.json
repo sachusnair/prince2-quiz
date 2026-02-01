@@ -1,0 +1,26 @@
+[
+  {
+    "topic": "Business Case",
+    "question": "In PRINCE2, what is the purpose of the Business Case?",
+    "options": [
+      "To define the project’s approach to quality management",
+      "To justify the project by showing it is desirable, viable and achievable",
+      "To describe how the project will be controlled on a day-to-day basis",
+      "To record all threats and opportunities affecting the project"
+    ],
+    "correctIndex": 1,
+    "rationale": "The Business Case provides the justification for the project and is maintained throughout the project to ensure continued viability."
+  },
+  {
+    "topic": "Themes",
+    "question": "Which PRINCE2 theme addresses how to identify, assess and control uncertainty?",
+    "options": [
+      "Risk",
+      "Plans",
+      "Progress",
+      "Change"
+    ],
+    "correctIndex": 0,
+    "rationale": "The Risk theme explains the approach to identify, assess and control uncertainty (threats and opportunities)."
+  }
+]
