@@ -1,3 +1,4 @@
+let RAW = null;
 let BANK = [];
 let QUIZ = [];
 let idx = 0;
@@ -7,9 +8,8 @@ let score = { correct: 0, incorrect: 0, total: 0 };
 let weakTopics = {}; // topic -> wrong count
 
 const LS = {
-  seen: "p2_seen_ids_v1",
-  lastDay: "p2_last_day_v1",
-  mode: "p2_mode_v1" // "daily" (default) or "mixed"
+  seen: "p2_seen_ids_v2",
+  mode: "p2_mode_v2" // "daily" (default) or "mixed"
 };
 
 const quizCard = document.getElementById("quizCard");
@@ -17,29 +17,19 @@ const resultCard = document.getElementById("resultCard");
 const bankInfo = document.getElementById("bankInfo");
 const countInput = document.getElementById("count");
 
-function todayKey() {
-  // Local day key (YYYY-MM-DD)
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function getSeenSet() {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(LS.seen) || "[]"));
-  } catch { return new Set(); }
-}
-function setSeenSet(seenSet) {
-  localStorage.setItem(LS.seen, JSON.stringify([...seenSet]));
-}
-
 function getMode() {
   return localStorage.getItem(LS.mode) || "daily";
 }
 function setMode(m) {
   localStorage.setItem(LS.mode, m);
+}
+
+function getSeenSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(LS.seen) || "[]")); }
+  catch { return new Set(); }
+}
+function setSeenSet(seenSet) {
+  localStorage.setItem(LS.seen, JSON.stringify([...seenSet]));
 }
 
 function shuffle(arr) {
@@ -51,7 +41,7 @@ function shuffle(arr) {
 }
 
 function esc(s) {
-  return String(s)
+  return String(s ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -71,7 +61,7 @@ function weakTopicsList() {
 
   if (entries.length === 0) return "<span class='muted'>None yet 🎯</span>";
 
-  return entries.slice(0, 5).map(([t, cnt]) =>
+  return entries.slice(0, 6).map(([t, cnt]) =>
     `<span class="pill">${esc(t)}: ${cnt}</span>`
   ).join(" ");
 }
@@ -86,6 +76,90 @@ function renderStats() {
     </p>
     <p class="muted"><b>Weak topics:</b> ${weakTopicsList()}</p>
   `;
+}
+
+// ---- Convert your JSON format -> internal format ----
+function correctLetterToIndex(ch) {
+  const map = { A: 0, B: 1, C: 2, D: 3 };
+  return map[(ch || "").trim().toUpperCase()];
+}
+
+function normalizeOne(rawQ) {
+  // rawQ shape (from your file):
+  // { source, question_number, question, options: {A,B,C,D}, correct_option: "A", rationale, syllabus_ref ... }
+
+  if (!rawQ || !rawQ.question || !rawQ.options) return null;
+
+  const opt = rawQ.options;
+
+  // options must contain A-D strings
+  const A = opt.A, B = opt.B, C = opt.C, D = opt.D;
+  if (![A, B, C, D].every(x => typeof x === "string" && x.trim().length > 0)) return null;
+
+  const correctIndex = correctLetterToIndex(rawQ.correct_option);
+  if (typeof correctIndex !== "number") return null;
+
+  const topic =
+    (typeof rawQ.syllabus_ref === "string" && rawQ.syllabus_ref.trim()) ? rawQ.syllabus_ref.trim()
+    : (typeof rawQ.source === "string" && rawQ.source.trim()) ? rawQ.source.trim()
+    : "General";
+
+  // Build a stable id
+  const id = `${rawQ.source || "SRC"}-${rawQ.question_number || "X"}`;
+
+  // We don't have per-option rationales in a structured way, so we show the main rationale
+  // and a simple fallback per option.
+  const mainRat = typeof rawQ.rationale === "string" ? rawQ.rationale : "—";
+
+  const optionRationales = [
+    "See rationale below.",
+    "See rationale below.",
+    "See rationale below.",
+    "See rationale below."
+  ];
+
+  return {
+    id,
+    topic,
+    question: rawQ.question,
+    options: [A, B, C, D],
+    correctIndex,
+    rationale: mainRat,
+    optionRationales
+  };
+}
+
+function buildBankFromRaw(rawJson) {
+  const rawList = Array.isArray(rawJson.questions) ? rawJson.questions : [];
+  const normalized = [];
+  for (const q of rawList) {
+    const n = normalizeOne(q);
+    if (n) normalized.push(n);
+  }
+  return normalized;
+}
+
+// ---- Quiz selection logic ----
+function buildQuiz(n) {
+  const mode = getMode(); // daily or mixed
+  let seen = getSeenSet();
+
+  // Daily mode: serve unseen first; when exhausted, reset cycle.
+  let pool = (mode === "mixed") ? [...BANK] : BANK.filter(q => !seen.has(q.id));
+  if (mode === "daily" && pool.length === 0) {
+    seen = new Set();
+    setSeenSet(seen);
+    pool = [...BANK];
+  }
+
+  const chosen = shuffle(pool).slice(0, Math.min(n, pool.length));
+
+  if (mode === "daily") {
+    chosen.forEach(q => seen.add(q.id));
+    setSeenSet(seen);
+  }
+
+  return chosen;
 }
 
 function renderQuestion() {
@@ -104,6 +178,9 @@ function renderQuestion() {
       </button>
     `).join("")}
     ${renderStats()}
+    <p class="muted" style="margin-top:10px;">
+      Mode: <b>${esc(getMode().toUpperCase())}</b> (press <b>M</b> to toggle Daily/Mixed)
+    </p>
   `;
 }
 
@@ -114,25 +191,13 @@ window.answer = function(choiceIndex) {
   const q = QUIZ[idx];
   score.total++;
 
-  const correctIndex = q.correctIndex;
-  const isCorrect = choiceIndex === correctIndex;
-
-  if (isCorrect) {
-    score.correct++;
-  } else {
+  const isCorrect = choiceIndex === q.correctIndex;
+  if (isCorrect) score.correct++;
+  else {
     score.incorrect++;
-    const topic = q.topic || "Uncategorized";
+    const topic = q.topic || "General";
     weakTopics[topic] = (weakTopics[topic] || 0) + 1;
   }
-
-  // Build “why others are wrong” section if provided
-  const hasOptionRats = Array.isArray(q.optionRationales) && q.optionRationales.length === q.options.length;
-
-  const optionExplain = q.options.map((opt, i) => {
-    const tag = i === correctIndex ? "✅ Correct" : "❌";
-    const why = hasOptionRats ? (q.optionRationales[i] || "—") : "Not provided in the rationale source.";
-    return `<li><b>${letter(i)})</b> ${esc(opt)} — <b>${tag}</b><br><span class="muted">${esc(why)}</span></li>`;
-  }).join("");
 
   resultCard.style.display = "block";
   resultCard.innerHTML = `
@@ -140,18 +205,21 @@ window.answer = function(choiceIndex) {
       ${isCorrect ? "✅ Correct" : "❌ Incorrect"}
     </div>
 
-    <p><b>Correct answer:</b> ${letter(correctIndex)}) ${esc(q.options[correctIndex])}</p>
+    <p><b>Correct answer:</b> ${letter(q.correctIndex)}) ${esc(q.options[q.correctIndex])}</p>
 
-    <p><b>Short explanation (rationale):</b> ${esc(q.rationale || "—")}</p>
+    <p><b>Short explanation (rationale):</b><br>${esc(q.rationale || "—")}</p>
 
     <p><b>Why the other options are wrong:</b></p>
-    <ol class="muted">${optionExplain}</ol>
+    <p class="muted">
+      This source provides a combined rationale (not per-option breakdown). Use the rationale above to understand why the correct option fits best.
+    </p>
 
     ${renderStats()}
 
     <div class="row">
       <button class="primary" onclick="next()">Next</button>
       <button onclick="endNow()">End session</button>
+      <button onclick="resetProgress()">Reset progress (no-repeat)</button>
     </div>
   `;
 };
@@ -162,10 +230,8 @@ window.next = function() {
     quizCard.innerHTML = `
       <h2>Done ✅</h2>
       ${renderStats()}
-      <button class="primary" onclick="start()">Start again</button>
-      <p class="muted">
-        In <b>Daily mode</b>, you’ll get new unseen questions first (until you finish the full bank).
-      </p>
+      <button class="primary" onclick="start()">Start again (new shuffle)</button>
+      <p class="muted">Daily mode prevents repeats until you finish the full bank on this device.</p>
     `;
     resultCard.style.display = "none";
     return;
@@ -182,66 +248,7 @@ window.endNow = function() {
   resultCard.style.display = "none";
 };
 
-async function loadBank() {
-  const res = await fetch("./questions.json", { cache: "no-store" });
-  if (!res.ok) throw new Error("Could not load questions.json");
-  const data = await res.json();
-
-  if (!Array.isArray(data) || data.length === 0) throw new Error("questions.json must be a non-empty array");
-
-  // Validate + enforce IDs
-  const ids = new Set();
-  data.forEach((q, i) => {
-    if (!q.id || !q.question || !Array.isArray(q.options) || q.options.length !== 4 || typeof q.correctIndex !== "number") {
-      throw new Error(`Invalid question at index ${i}. Required: id, question, options[4], correctIndex`);
-    }
-    if (ids.has(q.id)) throw new Error(`Duplicate id found: ${q.id}`);
-    ids.add(q.id);
-  });
-
-  BANK = data;
-  bankInfo.textContent = `Question bank loaded: ${BANK.length} questions`;
-}
-
-function maybeDailyReset() {
-  const today = todayKey();
-  const last = localStorage.getItem(LS.lastDay);
-
-  // If first time today, just record it. (We do NOT wipe "seen" daily —
-  // we prevent repeats until full bank is done.)
-  if (last !== today) {
-    localStorage.setItem(LS.lastDay, today);
-  }
-}
-
-function buildQuiz(n) {
-  const mode = getMode(); // daily or mixed
-  let seen = getSeenSet();
-
-  const unseen = BANK.filter(q => !seen.has(q.id));
-  const pool = (mode === "mixed") ? [...BANK] : [...unseen];
-
-  // If daily mode + unseen exhausted, reset seen to start fresh cycle
-  if (mode === "daily" && pool.length === 0) {
-    seen = new Set();
-    setSeenSet(seen);
-  }
-
-  const pool2 = (mode === "mixed") ? [...BANK] : BANK.filter(q => !seen.has(q.id));
-  const chosen = shuffle(pool2).slice(0, Math.min(n, pool2.length));
-
-  // Mark chosen as seen (daily mode only)
-  if (mode === "daily") {
-    chosen.forEach(q => seen.add(q.id));
-    setSeenSet(seen);
-  }
-
-  return chosen;
-}
-
 function start() {
-  maybeDailyReset();
-
   const nRaw = parseInt(countInput.value || "10", 10);
   const n = Math.max(1, Math.min(nRaw, BANK.length));
 
@@ -253,46 +260,44 @@ function start() {
 
   if (QUIZ.length === 0) {
     quizCard.style.display = "block";
-    quizCard.innerHTML = `
-      <h3>No questions available</h3>
-      <p class="muted">Check your questions.json file.</p>
-    `;
+    quizCard.innerHTML = `<h3>No questions available</h3><p class="muted">Check the JSON file.</p>`;
     return;
   }
-
   renderQuestion();
 }
 
 function resetProgress() {
   localStorage.removeItem(LS.seen);
-  localStorage.removeItem(LS.lastDay);
-  quizCard.style.display = "none";
-  resultCard.style.display = "none";
-  score = { correct: 0, incorrect: 0, total: 0 };
-  weakTopics = {};
-  alert("Progress reset. You will start from the full bank again.");
+  alert("Progress reset. Daily no-repeat will start from the full bank again.");
 }
 
 document.getElementById("startBtn").addEventListener("click", start);
 document.getElementById("resetBtn").addEventListener("click", resetProgress);
 
-// Optional: quick mode toggle via keyboard (M)
+// Toggle mode with M
 document.addEventListener("keydown", (e) => {
   if (e.key.toLowerCase() === "m") {
     const m = getMode() === "daily" ? "mixed" : "daily";
     setMode(m);
-    alert(`Mode switched to: ${m.toUpperCase()}\nDaily = no repeats until bank finished\nMixed = repeats allowed`);
+    alert(`Mode: ${m.toUpperCase()}\nDaily = no repeats until bank finished (on this device)\nMixed = repeats allowed`);
   }
 });
 
 (async () => {
   try {
-    await loadBank();
-    // default mode daily
+    // IMPORTANT: use your exact file name here
+    const res = await fetch("./prince2_v7_all_questions_answers_rationales.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("Could not load JSON file");
+    RAW = await res.json();
+
+    BANK = buildBankFromRaw(RAW);
+
+    bankInfo.textContent = `Question bank loaded: ${BANK.length} usable questions (filtered from ${RAW?.counts?.total ?? "?"})`;
     if (!localStorage.getItem(LS.mode)) setMode("daily");
+
   } catch (e) {
-    bankInfo.textContent = "Error loading question bank. See console.";
     console.error(e);
-    alert("Could not load questions.json. Make sure it exists in the repo root and is valid JSON.");
+    bankInfo.textContent = "Error loading question bank. See console.";
+    alert("Could not load the JSON file. Make sure it is uploaded to the repo root with the exact filename.");
   }
 })();
